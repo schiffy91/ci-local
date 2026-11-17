@@ -1,0 +1,35 @@
+name: local passes
+
+# What the owner's machines already passed for this exact commit. `ci-local push` posts each pass as a commit
+# status `local/<platform>/<job>` before the branch moves; this reads them and trusts only the ones the
+# repository's owner posted. A caller skips a job whose status is in `passed`:
+#
+#   jobs:
+#     local:
+#       uses: schiffy91/ci-local/.github/workflows/local-passes.yml@<commit>
+#       permissions:
+#         statuses: read
+#     checks:
+#       needs: local
+#       if: ${{ !contains(fromJSON(needs.local.outputs.passed), 'local/linux-x86_64/checks') }}
+on:
+  workflow_call:
+    outputs:
+      passed:
+        description: JSON array of the `local/<platform>/<job>` contexts whose latest status, from the owner, is success
+        value: ${{ jobs.read.outputs.passed }}
+
+jobs:
+  read:
+    runs-on: ubuntu-24.04
+    permissions:
+      statuses: read
+    outputs:
+      passed: ${{ steps.statuses.outputs.passed }}
+    steps:
+      - id: statuses
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses?per_page=100" | jq -c --arg owner "$GITHUB_REPOSITORY_OWNER" '[.[] | select(.creator.login == $owner and (.context | startswith("local/")))] | group_by(.context) | map(max_by(.created_at) | select(.state == "success") | .context)')
+          printf 'passed=%s\n' "$passed" | tee -a "$GITHUB_OUTPUT"

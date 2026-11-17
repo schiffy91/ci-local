@@ -1,0 +1,28 @@
+name: checks
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  local:
+    uses: ./.github/workflows/local-passes.yml
+    permissions:
+      statuses: read
+
+  checks:
+    needs: local
+    if: ${{ !contains(fromJSON(needs.local.outputs.passed), 'local/linux-x86_64/checks') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@v16
+      - name: run every check
+        if: ${{ !contains(fromJSON(needs.local.outputs.passed), 'local/linux-x86_64/checks') }}
+        run: ci/checks.sh
