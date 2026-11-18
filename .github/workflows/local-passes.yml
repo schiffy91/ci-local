@@ -1,8 +1,9 @@
 name: local passes
 
-# What the owner's machines already passed for this exact commit. `ci-local push` posts each pass as a commit
-# status `local/<platform>/<job>` before the branch moves; this reads them and trusts only the ones the
-# repository's owner posted. A caller skips a job whose status is in `passed`:
+# What the owner's machines already passed for this commit: the one pushed, or the head of a pull request.
+# `ci-local push` posts each pass as a commit status `local/<platform>/<job>` before the branch moves; this
+# reads them and trusts only the ones the repository's owner posted. A caller skips a job whose status is in
+# `passed`:
 #
 #   jobs:
 #     local:
@@ -30,6 +31,7 @@ jobs:
       - id: statuses
         env:
           GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}  # for a pull request GITHUB_SHA is the merge, which nobody tested
         run: |
-          passed=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/statuses?per_page=100" | jq -c --arg owner "$GITHUB_REPOSITORY_OWNER" '[.[] | select(.creator.login == $owner and (.context | startswith("local/")))] | group_by(.context) | map(max_by(.created_at) | select(.state == "success") | .context)')
+          passed=$(gh api "repos/$GITHUB_REPOSITORY/commits/$COMMIT/statuses?per_page=100" | jq -c --arg owner "$GITHUB_REPOSITORY_OWNER" '[.[] | select(.creator.login == $owner and (.context | startswith("local/")))] | group_by(.context) | map(max_by(.created_at) | select(.state == "success") | .context)')
           printf 'passed=%s\n' "$passed" | tee -a "$GITHUB_OUTPUT"

@@ -29,11 +29,16 @@ pkgs.runCommand "ci-local" { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
     "fails": { "platform": "$here", "run": "false" },
     "elsewhere": { "platform": "another-platform", "run": "true" },
     "litters": { "platform": "$here", "run": "touch stray" },
-    "turns": { "platform": "$here", "run": "test ! -e $FLAG" }
+    "after": { "platform": "$here", "run": "true" },
+    "turns": { "platform": "$here", "run": "test ! -e $FLAG" },
+    "slow": { "platform": "$here", "run": "test -e $TMPDIR/once || { touch $TMPDIR/once; sleep 2; }" },
+    "meets": { "platform": "$here", "light": true, "run": "touch $TMPDIR/met-1; for turn in \$(seq 100); do test -e $TMPDIR/met-2 && exit 0; sleep 0.1; done; exit 1" },
+    "met": { "platform": "$here", "light": true, "run": "touch $TMPDIR/met-2; for turn in \$(seq 100); do test -e $TMPDIR/met-1 && exit 0; sleep 0.1; done; exit 1" }
   } }
   JSON
   git add ci && git commit -qm first
   first=$(git rev-parse HEAD)
+  passes=.git/ci-local/trees/$(git rev-parse 'HEAD^{tree}')
 
   echo "A pass is for a commit: nothing is recorded on a tree with anything else in it"
   touch extra
@@ -43,14 +48,29 @@ pkgs.runCommand "ci-local" { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
 
   echo "A pass is recorded, a failure is not, and another platform's job is refused"
   tool run passes turns
-  test -s .git/ci-local/$first/passes.json && test -s .git/ci-local/$first/turns.json || fail "passes were not recorded"
+  test -s $passes/passes.json && test -s $passes/turns.json || fail "passes were not recorded"
   tool run fails && fail "a failing job reported success"
-  test ! -e .git/ci-local/$first/fails.json || fail "a failure was recorded"
+  test ! -e $passes/fails.json || fail "a failure was recorded"
   tool run elsewhere 2> $TMPDIR/refused && fail "ran another platform's job"
   grep -q "would not stand in for it" $TMPDIR/refused || fail "the refusal does not name the platform"
-  tool run litters 2> $TMPDIR/refused && fail "a job that changed the tree was recorded"
-  test ! -e .git/ci-local/$first/litters.json && grep -q "left the tree changed" $TMPDIR/refused || fail "a job that changed the tree was recorded"
+
+  echo "A job that leaves a file behind is not recorded, the file is named, and the jobs after it still run"
+  tool run litters after > $TMPDIR/ran 2> $TMPDIR/refused && fail "a job that changed the tree reported success"
+  test ! -e $passes/litters.json && test ! -e $passes/after.json || fail "a job was recorded on a changed tree"
+  grep -q "litters left the tree changed" $TMPDIR/refused && grep -q "^?? stray$" $TMPDIR/refused || fail "the file left behind is not named: $(cat $TMPDIR/refused)"
+  grep -q "after passed, but litters had left the tree changed before it ran" $TMPDIR/ran || fail "the job after it did not run, or did not say why it is not recorded: $(cat $TMPDIR/ran)"
   rm stray
+
+  echo "A job that passes again keeps the time its first run took"
+  tool run slow | grep -q "slow passed in [2-9] s" || fail "the first run was not timed"
+  tool run slow | grep -q "slow passed in [01] s; recorded for .* (first run: [2-9] s)" || fail "the second run does not name the first run's time"
+  grep -q '"seconds": [2-9],' $passes/slow.json || fail "the receipt lost the first run's time"
+  rm $passes/slow.json
+
+  echo "Light jobs named next to each other run at the same time"
+  tool run meets met || fail "each waits for the other to have started; one after the other, neither can pass"
+  test -s $passes/meets.json && test -s $passes/met.json || fail "the light jobs were not recorded"
+  rm $passes/meets.json $passes/met.json
   tool status | grep -q "local/$here/passes .*not published" || fail "the status does not list the pass"
 
   echo "A push posts the passes before the branch moves, for that commit, and leaves nothing behind"
@@ -62,11 +82,22 @@ pkgs.runCommand "ci-local" { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
   test -z "$(git --git-dir "$ORIGIN" for-each-ref refs/ci-local)" || fail "the holding ref was left behind"
   tool status | grep -q "local/$here/passes .* published" || fail "the status does not say published"
 
-  echo "A job that fails after its pass was published takes the pass back"
+  echo "A reworded commit has the same files, so it has the passes; they are posted on it when it is pushed"
+  git commit -q --amend -m "first, reworded"
+  reworded=$(git rev-parse HEAD)
+  test "$reworded" != "$first" || fail "the commit was not reworded"
+  tool status | grep -q "local/$here/passes .*not published  (run on $(echo $first | cut -c1-12), the same files)" || fail "the reworded commit lost its pass: $(tool status)"
+  git checkout -q -b reworded
+  tool push -q origin reworded
+  grep -q "statuses/$reworded -f state=success -f context=local/$here/passes " "$POSTED" || fail "the pass was not posted on the reworded commit"
+  test "$(wc -l < "$POSTED")" = 4 || fail "expected two more statuses: $(cat "$POSTED")"
+  git checkout -q main && git reset -q --hard $first && git branch -q -D reworded
+
+  echo "A job that fails after its pass was published takes the pass back, on every commit it was posted on"
   touch "$FLAG"
   tool run turns && fail "the turned job reported success"
-  test ! -e .git/ci-local/$first/turns.json || fail "the stale pass was kept"
-  tail -1 "$POSTED" | grep -q "statuses/$first -f state=failure -f context=local/$here/turns " || fail "the failure was not posted: $(tail -1 "$POSTED")"
+  test ! -e $passes/turns.json || fail "the stale pass was kept"
+  grep -q "statuses/$first -f state=failure -f context=local/$here/turns " "$POSTED" && grep -q "statuses/$reworded -f state=failure -f context=local/$here/turns " "$POSTED" || fail "the failure was not posted on both commits: $(tail -2 "$POSTED")"
 
   echo "A commit with nothing recorded is pushed as it is"
   echo more > file && git add file && git commit -qm second
@@ -82,5 +113,6 @@ pkgs.runCommand "ci-local" { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
     grep -qF "run: $run" $workflow || fail "the workflow does not run '$run' for $job"
     test "$(grep -cF "'local/$where/$job'" $workflow)" = 2 || fail "the workflow does not skip $job on local/$where/$job at the step and at the job"
   done
+  grep -qF 'github.event.pull_request.head.sha || github.sha' ${../.github/workflows/local-passes.yml} || fail "the statuses are not read from a pull request's head commit"
   touch $out
 ''

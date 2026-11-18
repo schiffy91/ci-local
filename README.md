@@ -3,8 +3,8 @@
 A job this machine has already passed for a commit is not run again by GitHub.
 
 `ci-local` runs the jobs a repository's `ci/local.json` names for this platform, with the same commands
-its workflow uses, and records each pass for the exact commit. `ci-local push` posts the passes to GitHub
-as commit statuses before the branch moves, and the workflow skips each job whose status is there.
+its workflow uses, and records each pass for the files of the commit. `ci-local push` posts the passes to
+GitHub as commit statuses before the branch moves, and the workflow skips each job whose status is there.
 
 ```bash
 ci-local run            # every job of this platform; or: ci-local run lint checks
@@ -16,16 +16,23 @@ ci-local push           # put the commit on GitHub, post its passes, then git pu
 ## What counts as a pass
 
 - A pass is recorded only for a commit: the tree must be clean before and after the job, with `HEAD`
-  unchanged. A job that leaves a file behind is not recorded.
+  unchanged. A job that leaves a file behind is not recorded; the file is named, and the jobs after it
+  still run, unrecorded, so one stray file does not hide what the others would have said.
+- A pass belongs to the commit's files, not its hash. A commit that is reworded, amended or rebased onto
+  the same files has the pass too, and `ci-local push` posts it on that commit. The job table is one of
+  the files, so the same files always mean the same command.
+- The time kept for a pass is that of its first run on those files. A run that passes again from caches
+  does not replace it.
 - The status is `local/<platform>/<job>`, where the platform is the machine's own (`linux-x86_64`,
   `macos-arm64`, ...). A pass on one platform never stands in for another, and a job the table gives to
   another platform is refused here.
 - `ci-local push` first pushes the commit to a holding ref that no workflow watches, posts the statuses,
   removes the ref and then pushes the branch, so the workflow finds the statuses when it starts.
-- A job that fails after its pass was published posts a failure in its place.
+- A job that fails after its pass was published posts a failure in its place, on every commit the pass
+  was posted on.
 - A commit with nothing recorded is pushed as it is, and every job runs on GitHub as before.
 
-Receipts are kept in the repository's git directory, under `ci-local/<commit>/`.
+Receipts are kept in the repository's git directory, under `ci-local/trees/<tree>/`.
 
 ## The job table
 
@@ -40,13 +47,18 @@ Receipts are kept in the repository's git directory, under `ci-local/<commit>/`.
 }
 ```
 
+Jobs run one after another in the order named. A job marked `"light": true` runs at the same time as the
+light jobs named next to it; mark only jobs that leave room for each other on the machine. If one of them
+leaves a file behind, none of that group is recorded.
+
 A job may be in the table for the record only. A test run too long for a hosted runner has no job in the
 workflow; its status is then the one place a commit shows that it passed.
 
 ## The workflow
 
-`.github/workflows/local-passes.yml` is a reusable workflow. It reads the commit's statuses, keeps the
-ones the repository's owner posted, and gives the contexts that passed as the output `passed`. Pin it by
+`.github/workflows/local-passes.yml` is a reusable workflow. It reads the commit's statuses (for a pull
+request, those of its head commit, not of the merge GitHub makes), keeps the ones the repository's owner
+posted, and gives the contexts that passed as the output `passed`. Pin it by
 commit:
 
 ```yaml

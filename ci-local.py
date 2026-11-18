@@ -15,8 +15,10 @@ USAGE = """ci-local: let a commit's local test passes stand in for the same jobs
   ci-local publish        post the recorded passes to GitHub as commit statuses (the commit must be there)
   ci-local push [ARGS]    put the commit on GitHub, post its passes, then `git push ARGS`
 
-A pass is recorded only for the exact commit: the tree must be clean before and after, with HEAD unchanged.
-The status is `local/<platform>/<job>`; a workflow skips a job whose status the repository's owner posted."""
+A pass is recorded for the files of a commit: the tree must be clean before and after, with HEAD unchanged.
+A commit with the same files and the same job command has the pass too, so a reworded or amended commit keeps it.
+Jobs marked `"light": true` in the table run at the same time as the light jobs named next to them.
+The status is `local/<platform>/<job>`, posted on a commit; a workflow skips a job whose status the repository's owner posted."""
 
 
 class Local:
@@ -48,13 +50,16 @@ class Local:
     def context(cls, job, where): return f"local/{where}/{job}"
 
     @classmethod
-    def receipts(cls, commit): return Path(cls.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "ci-local" / commit
+    def tree(cls, commit): return cls.git("rev-parse", f"{commit}^{{tree}}")
+
+    @classmethod
+    def receipts(cls, commit): return Path(cls.git("rev-parse", "--path-format=absolute", "--git-common-dir")) / "ci-local" / "trees" / cls.tree(commit)
 
     @classmethod
     def receipt(cls, commit, job): return cls.receipts(commit) / (re.sub(r"[^A-Za-z0-9._-]+", "_", job) + ".json")
 
     @classmethod
-    def recorded(cls, commit): return [json.loads(path.read_text()) for path in sorted(cls.receipts(commit).glob("*.json"))]
+    def recorded(cls, commit): return [json.loads(path.read_text()) for path in sorted(cls.receipts(commit).glob("*.json"))]  # the job table is among the files, so the same files mean the same command
 
     @classmethod
     def repository(cls):
@@ -63,35 +68,59 @@ class Local:
         return match.group(1)
 
     @classmethod
-    def post(cls, entry, state, description):
-        command = ["gh", "api", "--method", "POST", f"repos/{cls.repository()}/statuses/{entry['commit']}", "-f", f"state={state}", "-f", f"context={entry['context']}", "-f", f"description={description[:140]}"]
+    def post(cls, entry, commit, state, description):
+        command = ["gh", "api", "--method", "POST", f"repos/{cls.repository()}/statuses/{commit}", "-f", f"state={state}", "-f", f"context={entry['context']}", "-f", f"description={description[:140]}"]
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0: sys.exit(f"ci-local: could not post {entry['context']}: {result.stderr.strip()}")
 
     @classmethod
+    def groups(cls, names, jobs):
+        groups = []
+        for name in names:
+            if jobs[name].get("light") and groups and jobs[groups[-1][0]].get("light"): groups[-1].append(name)
+            else: groups.append([name])
+        return groups
+
+    @classmethod
+    def record(cls, commit, name, job, here, seconds):
+        path = cls.receipt(commit, name)
+        earlier = json.loads(path.read_text()) if path.exists() else {}
+        entry = {"commit": commit, "tree": cls.tree(commit), "job": name, "platform": here, "context": cls.context(name, here), "host": socket.gethostname(), "run": job["run"], "finished": int(time.time()), "seconds": earlier.get("seconds", seconds), "published": earlier.get("published", {})}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entry, indent=2) + "\n")
+        print(f"ci-local: {name} passed in {seconds} s; recorded for {commit[:12]}" + (f" (first run: {entry['seconds']} s)" if entry["seconds"] != seconds else ""), flush=True)
+
+    @classmethod
+    def forget(cls, commit, name, code):
+        path = cls.receipt(commit, name)
+        earlier = json.loads(path.read_text()) if path.exists() else {}
+        for published in earlier.get("published", {}): cls.post(earlier, published, "failure", f"failed on {socket.gethostname()} after an earlier local pass")
+        path.unlink(missing_ok=True)
+        print(f"ci-local: {name} FAILED (exit {code}); nothing recorded", flush=True)
+
+    @classmethod
     def run(cls, names):
-        jobs, here, commit, failed = cls.jobs(), cls.platform(), cls.head(), []
+        jobs, here, commit, failed, littered = cls.jobs(), cls.platform(), cls.head(), [], ""
         for name in names:
             if name not in jobs: sys.exit(f"ci-local: ci/local.json names no job {name}; it names: {', '.join(jobs)}")
             if jobs[name]["platform"] != here: sys.exit(f"ci-local: {name} is a {jobs[name]['platform']} job and this is {here}; a pass here would not stand in for it")
         if not cls.clean(): sys.exit("ci-local: the tree has changes or untracked files; a pass is recorded for a commit, so commit or remove them first")
-        for name in names or [name for name, job in jobs.items() if job["platform"] == here]:
-            print(f"ci-local: {name}: {jobs[name]['run']}", flush=True)
-            started = time.time()
-            code = subprocess.run(jobs[name]["run"], shell=True, cwd=cls.root()).returncode
-            path = cls.receipt(commit, name)
-            if code == 0 and (cls.head() != commit or not cls.clean()): sys.exit(f"ci-local: {name} passed but left the tree changed or HEAD moved; nothing recorded")
-            if code != 0:
-                earlier = json.loads(path.read_text()) if path.exists() else None
-                if earlier and earlier.get("published"): cls.post(earlier, "failure", f"failed on {socket.gethostname()} after an earlier local pass")
-                path.unlink(missing_ok=True)
-                failed.append(name)
-                print(f"ci-local: {name} FAILED (exit {code}); nothing recorded", flush=True)
-                continue
-            path.parent.mkdir(parents=True, exist_ok=True)
-            entry = {"commit": commit, "job": name, "platform": here, "context": cls.context(name, here), "host": socket.gethostname(), "run": jobs[name]["run"], "finished": int(time.time()), "seconds": int(time.time() - started)}
-            path.write_text(json.dumps(entry, indent=2) + "\n")
-            print(f"ci-local: {name} passed in {entry['seconds']} s; recorded for {commit[:12]}", flush=True)
+        for group in cls.groups(names or [name for name, job in jobs.items() if job["platform"] == here], jobs):
+            started, running = time.time(), []
+            for name in group:
+                print(f"ci-local: {name}: {jobs[name]['run']}", flush=True)
+                running.append((name, subprocess.Popen(jobs[name]["run"], shell=True, cwd=cls.root())))
+            finished = [(name, process.wait(), int(time.time() - started)) for name, process in running]
+            if cls.head() != commit: sys.exit(f"ci-local: HEAD moved during {' and '.join(group)}; nothing recorded")
+            left = cls.git("status", "--porcelain")
+            if left and not littered: print(f"ci-local: {' or '.join(group)} left the tree changed:\n{left}", file=sys.stderr, flush=True)
+            for name, code, seconds in finished:
+                if code != 0: cls.forget(commit, name, code)
+                elif littered: print(f"ci-local: {name} passed, but {littered} had left the tree changed before it ran; nothing recorded", flush=True)
+                elif left: print(f"ci-local: {name} passed but the tree is changed; nothing recorded", flush=True)
+                else: cls.record(commit, name, jobs[name], here, seconds)
+                if code != 0 or left or littered: failed.append(name)
+            if left and not littered: littered = " or ".join(group)
         return 1 if failed else 0
 
     @classmethod
@@ -99,7 +128,7 @@ class Local:
         commit = cls.head()
         entries = cls.recorded(commit)
         if not entries: print(f"Nothing is recorded for {commit[:12]}.")
-        for entry in entries: print(f"{entry['context']}  passed on {entry['host']} in {entry['seconds']} s  {'published' if entry.get('published') else 'not published'}")
+        for entry in entries: print(f"{entry['context']}  passed on {entry['host']} in {entry['seconds']} s  {'published' if commit in entry['published'] else 'not published'}" + ("" if entry["commit"] == commit else f"  (run on {entry['commit'][:12]}, the same files)"))
         return 0
 
     @classmethod
@@ -107,8 +136,8 @@ class Local:
         commit = cls.head()
         for entry in cls.recorded(commit):
             minutes = max(1, round(entry["seconds"] / 60))
-            cls.post(entry, "success", f"passed on {entry['host']} in {minutes} min")
-            entry["published"] = int(time.time())
+            cls.post(entry, commit, "success", f"passed on {entry['host']} in {minutes} min")
+            entry["published"][commit] = int(time.time())
             cls.receipt(commit, entry["job"]).write_text(json.dumps(entry, indent=2) + "\n")
             print(f"ci-local: posted {entry['context']}")
         return 0
