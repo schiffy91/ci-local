@@ -105,6 +105,42 @@ pkgs.runCommand "ci-local" { nativeBuildInputs = [ pkgs.git pkgs.python3 ]; } ''
   tool push -q origin main 2>&1 | grep -q "nothing is recorded" || fail "did not say nothing is recorded"
   test "$(git --git-dir "$ORIGIN" rev-parse refs/heads/main)" = "$(git rev-parse HEAD)" && test "$(wc -l < "$POSTED")" = "$before" || fail "pushed wrongly or posted something"
 
+  echo "A repository without a job table names both .github/ci/local.json and ci/local.json"
+  git init -q $TMPDIR/missing && cd $TMPDIR/missing
+  git commit -q --allow-empty -m empty
+  tool run passes 2> $TMPDIR/missing-err && fail "ran without a job table"
+  grep -qF ".github/ci/local.json" $TMPDIR/missing-err && grep -qF "ci/local.json" $TMPDIR/missing-err || fail "missing-table error did not name both locations: $(cat $TMPDIR/missing-err)"
+
+  echo "Primary .github/ci/local.json works without ci/local.json"
+  git init -q $TMPDIR/primary && cd $TMPDIR/primary
+  mkdir -p .github/ci
+  cat > .github/ci/local.json <<JSON
+  { "jobs": {
+    "primary": { "platform": "$here", "run": "true" }
+  } }
+  JSON
+  git add .github && git commit -qm primary
+  primary_passes=.git/ci-local/trees/$(git rev-parse 'HEAD^{tree}')
+  tool run primary
+  test -s "$primary_passes/primary.json" || fail "primary .github/ci/local.json pass was not recorded"
+  tool run fallback 2> $TMPDIR/primary-err && fail "unknown job succeeded on primary table"
+  grep -qF ".github/ci/local.json names no job fallback" $TMPDIR/primary-err || fail "unknown-job error did not name .github/ci/local.json: $(cat $TMPDIR/primary-err)"
+
+  echo "Primary .github/ci/local.json takes precedence over fallback ci/local.json"
+  mkdir -p ci
+  cat > ci/local.json <<JSON
+  { "jobs": {
+    "fallback": { "platform": "$here", "run": "true" }
+  } }
+  JSON
+  git add ci && git commit -qm both
+  both_passes=.git/ci-local/trees/$(git rev-parse 'HEAD^{tree}')
+  tool run primary
+  test -s "$both_passes/primary.json" || fail "primary job failed when both tables exist"
+  tool run fallback 2> $TMPDIR/precedence-err && fail "fallback job ran despite .github/ci/local.json existing"
+  grep -qF ".github/ci/local.json names no job fallback" $TMPDIR/precedence-err || fail "precedence error did not name .github/ci/local.json: $(cat $TMPDIR/precedence-err)"
+  cd $TMPDIR/work
+
   echo "The workflow skips exactly what the table names, and runs the same commands"
   table=${table} workflow=${workflow}
   for job in ${toString jobs}; do

@@ -14,7 +14,7 @@
       });
       # The tool against a repository of its own, and this repository's workflow against its own job table.
       # A repository that uses the tool builds the same check against its table and workflow:
-      #   import "${inputs.ci-local}/tests/ci_local.nix" { inherit pkgs; table = ./ci/local.json; workflow = ./.github/workflows/checks.yml; jobs = [ "lint" "checks" ]; }
+      #   import "${inputs.ci-local}/tests/ci_local.nix" { inherit pkgs; table = ./.github/ci/local.json; workflow = ./.github/workflows/checks.yml; jobs = [ "lint" "checks" ]; }
       checks = each (pkgs: { ci-local = import ./tests/ci_local.nix { inherit pkgs; }; });
     };
 }

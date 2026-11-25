@@ -10,7 +10,7 @@ from pathlib import Path
 
 USAGE = """ci-local: let a commit's local test passes stand in for the same jobs in CI.
 
-  ci-local run [JOB...]   run this platform's jobs from ci/local.json on a clean tree; record each pass
+  ci-local run [JOB...]   run this platform's jobs from .github/ci/local.json (or ci/local.json) on a clean tree; record each pass
   ci-local status         what is recorded for HEAD, and what has been published
   ci-local publish        post the recorded passes to GitHub as commit statuses (the commit must be there)
   ci-local push [ARGS]    put the commit on GitHub, post its passes, then `git push ARGS`
@@ -40,11 +40,21 @@ class Local:
     @classmethod
     def clean(cls): return cls.git("status", "--porcelain") == ""
 
+    TABLE_PATHS = (Path(".github/ci/local.json"), Path("ci/local.json"))
+
+    @classmethod
+    def table(cls):
+        root = cls.root()
+        for relative in cls.TABLE_PATHS:
+            candidate = root / relative
+            if candidate.is_file():
+                return candidate
+        searched = " or ".join(str(root / relative) for relative in cls.TABLE_PATHS)
+        sys.exit(f"ci-local: {searched} does not exist; it names the jobs a local pass may stand in for")
+
     @classmethod
     def jobs(cls):
-        table = cls.root() / "ci" / "local.json"
-        if not table.exists(): sys.exit(f"ci-local: {table} does not exist; it names the jobs a local pass may stand in for")
-        return json.loads(table.read_text())["jobs"]
+        return json.loads(cls.table().read_text())["jobs"]
 
     @classmethod
     def context(cls, job, where): return f"local/{where}/{job}"
@@ -100,9 +110,10 @@ class Local:
 
     @classmethod
     def run(cls, names):
-        jobs, here, commit, failed, littered = cls.jobs(), cls.platform(), cls.head(), [], ""
+        table = cls.table()
+        jobs, here, commit, failed, littered = json.loads(table.read_text())["jobs"], cls.platform(), cls.head(), [], ""
         for name in names:
-            if name not in jobs: sys.exit(f"ci-local: ci/local.json names no job {name}; it names: {', '.join(jobs)}")
+            if name not in jobs: sys.exit(f"ci-local: {table.relative_to(cls.root())} names no job {name}; it names: {', '.join(jobs)}")
             if jobs[name]["platform"] != here: sys.exit(f"ci-local: {name} is a {jobs[name]['platform']} job and this is {here}; a pass here would not stand in for it")
         if not cls.clean(): sys.exit("ci-local: the tree has changes or untracked files; a pass is recorded for a commit, so commit or remove them first")
         for group in cls.groups(names or [name for name, job in jobs.items() if job["platform"] == here], jobs):

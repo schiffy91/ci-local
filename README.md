@@ -2,7 +2,7 @@
 
 A job this machine has already passed for a commit is not run again by GitHub.
 
-`ci-local` runs the jobs a repository's `ci/local.json` names for this platform, with the same commands
+`ci-local` runs the jobs a repository's `.github/ci/local.json` (or `ci/local.json`) names for this platform, with the same commands
 its workflow uses, and records each pass for the files of the commit. `ci-local push` posts the passes to
 GitHub as commit statuses before the branch moves, and the workflow skips each job whose status is there.
 
@@ -36,7 +36,7 @@ Receipts are kept in the repository's git directory, under `ci-local/trees/<tree
 
 ## The job table
 
-`ci/local.json` in the repository that uses the tool:
+`.github/ci/local.json` (or `ci/local.json`) in the repository that uses the tool:
 
 ```json
 {
@@ -104,7 +104,7 @@ same check against its own files:
 ```nix
 checks.ci-local = import "${inputs.ci-local}/tests/ci_local.nix" {
   inherit pkgs;
-  table = ./ci/local.json;
+  table = ./.github/ci/local.json;
   workflow = ./.github/workflows/checks.yml;
   jobs = [ "lint" "checks" ];
 };
